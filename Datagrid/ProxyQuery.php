@@ -48,13 +48,20 @@ class ProxyQuery implements ProxyQueryInterface
     protected $entityJoinAliases;
 
     /**
+     * The map of query hints.
+     *
+     * @var array<string,mixed>
+     */
+    private $hints = [];
+
+    /**
      * @param QueryBuilder $queryBuilder
      */
     public function __construct($queryBuilder)
     {
         $this->queryBuilder = $queryBuilder;
         $this->uniqueParameterId = 0;
-        $this->entityJoinAliases = array();
+        $this->entityJoinAliases = [];
     }
 
     /**
@@ -62,7 +69,7 @@ class ProxyQuery implements ProxyQueryInterface
      */
     public function __call($name, $args)
     {
-        return call_user_func_array(array($this->queryBuilder, $name), $args);
+        return call_user_func_array([$this->queryBuilder, $name], $args);
     }
 
     /**
@@ -84,7 +91,7 @@ class ProxyQuery implements ProxyQueryInterface
     /**
      * {@inheritdoc}
      */
-    public function execute(array $params = array(), $hydrationMode = null)
+    public function execute(array $params = [], $hydrationMode = null)
     {
         // always clone the original queryBuilder
         $queryBuilder = clone $this->queryBuilder;
@@ -94,7 +101,7 @@ class ProxyQuery implements ProxyQueryInterface
         // todo : check how doctrine behave, potential SQL injection here ...
         if ($this->getSortBy()) {
             $sortBy = $this->getSortBy();
-            if (strpos($sortBy, '.') === false) { // add the current alias
+            if (false === strpos($sortBy, '.')) { // add the current alias
                 $sortBy = $rootAlias.'.'.$sortBy;
             }
             $queryBuilder->addOrderBy($sortBy, $this->getSortOrder());
@@ -114,11 +121,11 @@ class ProxyQuery implements ProxyQueryInterface
             ->getMetadataFor(current($queryBuilder->getRootEntities()))
             ->getIdentifierFieldNames();
 
-        $existingOrders = array();
+        $existingOrders = [];
         /** @var Query\Expr\OrderBy $order */
         foreach ($queryBuilder->getDQLPart('orderBy') as $order) {
             foreach ($order->getParts() as $part) {
-                $existingOrders[] = trim(str_replace(array(Criteria::DESC, Criteria::ASC), '', $part));
+                $existingOrders[] = trim(str_replace([Criteria::DESC, Criteria::ASC], '', $part));
             }
         }
 
@@ -132,7 +139,12 @@ class ProxyQuery implements ProxyQueryInterface
             }
         }
 
-        return $this->getFixedQueryBuilder($queryBuilder)->getQuery()->execute($params, $hydrationMode);
+        $query = $this->getFixedQueryBuilder($queryBuilder)->getQuery();
+        foreach ($this->hints as $name => $value) {
+            $query->setHint($name, $value);
+        }
+
+        return $query->execute($params, $hydrationMode);
     }
 
     /**
@@ -239,7 +251,7 @@ class ProxyQuery implements ProxyQueryInterface
      */
     public function entityJoin(array $associationMappings)
     {
-        $alias = $this->queryBuilder->getRootAlias();
+        $alias = current($this->queryBuilder->getRootAliases());
 
         $newAlias = 's';
 
@@ -273,6 +285,24 @@ class ProxyQuery implements ProxyQueryInterface
     }
 
     /**
+     * Sets a {@see \Doctrine\ORM\Query} hint. If the hint name is not recognized, it is silently ignored.
+     *
+     * @param string $name  the name of the hint
+     * @param mixed  $value the value of the hint
+     *
+     * @return ProxyQueryInterface
+     *
+     * @see \Doctrine\ORM\Query::setHint
+     * @see \Doctrine\ORM\Query::HINT_CUSTOM_OUTPUT_WALKER
+     */
+    final public function setHint($name, $value)
+    {
+        $this->hints[$name] = $value;
+
+        return $this;
+    }
+
+    /**
      * This method alters the query to return a clean set of object with a working
      * set of Object.
      *
@@ -294,7 +324,7 @@ class ProxyQuery implements ProxyQueryInterface
         $idNames = $metadata->getIdentifierFieldNames();
 
         // step 3 : retrieve the different subjects ids
-        $selects = array();
+        $selects = [];
         $idxSelect = '';
         foreach ($idNames as $idName) {
             $select = sprintf('%s.%s', $rootAlias, $idName);
@@ -307,10 +337,10 @@ class ProxyQuery implements ProxyQueryInterface
             if ($metadata->hasAssociation($idName)) {
                 $idSelect = sprintf('IDENTITY(%s) as %s', $idSelect, $idName);
             }
-            $idxSelect .= ($idxSelect !== '' ? ', ' : '').$idSelect;
+            $idxSelect .= ('' !== $idxSelect ? ', ' : '').$idSelect;
         }
-        $queryBuilderId->resetDQLPart('select');
-        $queryBuilderId->add('select', 'DISTINCT '.$idxSelect);
+        $queryBuilderId->select($idxSelect);
+        $queryBuilderId->distinct();
 
         // for SELECT DISTINCT, ORDER BY expressions must appear in idxSelect list
         /* Consider
@@ -318,19 +348,11 @@ class ProxyQuery implements ProxyQueryInterface
         For any particular x-value in the table there might be many different y
         values.  Which one will you use to sort that x-value in the output?
         */
-        // todo : check how doctrine behave, potential SQL injection here ...
-        if ($this->getSortBy()) {
-            $sortBy = $this->getSortBy();
-            if (strpos($sortBy, '.') === false) { // add the current alias
-                $sortBy = $rootAlias.'.'.$sortBy;
-            }
-            $sortBy .= ' AS __order_by';
-            $queryBuilderId->addSelect($sortBy);
-        }
+        $this->addOrderedColumns($queryBuilderId);
 
-        $results = $queryBuilderId->getQuery()->execute(array(), Query::HYDRATE_ARRAY);
+        $results = $queryBuilderId->getQuery()->execute([], Query::HYDRATE_ARRAY);
         $platform = $queryBuilderId->getEntityManager()->getConnection()->getDatabasePlatform();
-        $idxMatrix = array();
+        $idxMatrix = [];
         foreach ($results as $id) {
             foreach ($idNames as $idName) {
                 // Convert ids to database value in case of custom type, if provided.
@@ -354,5 +376,16 @@ class ProxyQuery implements ProxyQueryInterface
         }
 
         return $queryBuilder;
+    }
+
+    private function addOrderedColumns(QueryBuilder $queryBuilder)
+    {
+        /* For each ORDER BY clause defined directly in the DQL parts of the query,
+           we add an entry in the SELECT clause. */
+        foreach ((array) $queryBuilder->getDqlPart('orderBy') as $part) {
+            foreach ($part->getParts() as $orderBy) {
+                $queryBuilder->addSelect(preg_replace("/\s+(ASC|DESC)$/i", '', $orderBy));
+            }
+        }
     }
 }
