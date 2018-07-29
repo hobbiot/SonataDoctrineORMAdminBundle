@@ -342,8 +342,11 @@ class ProxyQuery implements ProxyQueryInterface
         For any particular x-value in the table there might be many different y
         values.  Which one will you use to sort that x-value in the output?
         */
+        $this->addOrderedColumns($queryBuilderId);
+
         $queryId = $queryBuilderId->getQuery();
         $queryId->setHint(Query::HINT_CUSTOM_TREE_WALKERS, [OrderByToSelectWalker::class]);
+
         $results = $queryId->execute([], Query::HYDRATE_ARRAY);
         $platform = $queryBuilderId->getEntityManager()->getConnection()->getDatabasePlatform();
         $idxMatrix = [];
@@ -356,7 +359,6 @@ class ProxyQuery implements ProxyQueryInterface
                     : $id[$idName];
             }
         }
-
         // step 4 : alter the query to match the targeted ids
         foreach ($idxMatrix as $idName => $idx) {
             if (count($idx) > 0) {
@@ -370,5 +372,16 @@ class ProxyQuery implements ProxyQueryInterface
         }
 
         return $queryBuilder;
+    }
+
+    private function addOrderedColumns(QueryBuilder $queryBuilder)
+    {
+        /* For each ORDER BY clause defined directly in the DQL parts of the query,
+           we add an entry in the SELECT clause. */
+        foreach ((array) $queryBuilder->getDqlPart('orderBy') as $part) {
+            foreach ($part->getParts() as $orderBy) {
+                $queryBuilder->addSelect(preg_replace("/\s+(ASC|DESC)$/i", '', $orderBy));
+            }
+        }
     }
 }
